@@ -1,0 +1,879 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ligier Promo</title>
+<style>
+  html,body{margin:0;background:#000;height:100%;display:flex;align-items:center;justify-content:center;overflow:hidden}
+  canvas{width:100vw;height:56.25vw;max-height:100vh;max-width:177.78vh;display:block}
+</style>
+</head>
+<body>
+<canvas id="c" width="1920" height="1080"></canvas>
+<script>
+// =====================================================================
+//  LIGIER — video promocional (Grass Bio + Cero + Tracker + Orbit)
+//  Todo se dibuja en canvas en función del tiempo t (determinístico),
+//  así render.js puede capturar cuadro por cuadro.
+// =====================================================================
+const W = 1920, H = 1080;
+const cv = document.getElementById('c');
+const ctx = cv.getContext('2d');
+const FONT = 'Inter, "Liberation Sans", Arial, sans-serif';
+
+// ---------- utilidades
+const clamp = (x, a = 0, b = 1) => Math.min(b, Math.max(a, x));
+const lerp = (a, b, t) => a + (b - a) * t;
+const prog = (t, a, b) => clamp((t - a) / (b - a));
+const E = {
+  out: t => 1 - Math.pow(1 - t, 3),
+  inOut: t => t < .5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2,
+  back: t => { const c1 = 1.70158, c3 = c1 + 1; return 1 + c3 * Math.pow(t - 1, 3) + c1 * Math.pow(t - 1, 2); },
+  expo: t => t >= 1 ? 1 : 1 - Math.pow(2, -10 * t),
+  in: t => t * t,
+};
+function rng(seed) {
+  return function () {
+    seed |= 0; seed = seed + 0x6D2B79F5 | 0;
+    let t = Math.imul(seed ^ seed >>> 15, 1 | seed);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+
+// ---------- paleta
+const C = {
+  deep: '#06170F', dark: '#0B2E22', green: '#1F8A4C', lime: '#B5E61D', white: '#FFFFFF',
+  glow: '#8DFFB9', uv: '#8B4DFF',
+};
+const PRODUCTS = {
+  grass:   { lines: ['GRASS', 'BIO'], tag: 'COADYUVANTE', c1: '#3DB85A', c2: '#0F6B34' },
+  cero:    { lines: ['CERO'],         tag: 'ANTIESPUMANTE', c1: '#2BB6E8', c2: '#0B5F8A' },
+  tracker: { lines: ['TRACKER'],      tag: 'TRAZADOR UV', c1: '#8E55F0', c2: '#3D1A8C' },
+  orbit:   { lines: ['ORBIT'],        tag: 'ADYUVANTE DRONES', c1: '#F99A35', c2: '#B04E06' },
+};
+
+// ---------- primitivas de texto
+function txt(str, x, y, o = {}) {
+  const { size = 60, weight = 800, color = '#fff', align = 'left', alpha = 1, ls = 0, italic = false, shadow = 0 } = o;
+  if (alpha <= 0) return;
+  ctx.save();
+  ctx.globalAlpha *= alpha;
+  ctx.font = `${italic ? 'italic ' : ''}${weight} ${size}px ${FONT}`;
+  ctx.letterSpacing = ls + 'px';
+  ctx.fillStyle = color; ctx.textAlign = align; ctx.textBaseline = 'alphabetic';
+  if (shadow) { ctx.shadowColor = 'rgba(0,0,0,.45)'; ctx.shadowBlur = shadow; ctx.shadowOffsetY = shadow / 3; }
+  ctx.fillText(str, x, y);
+  ctx.restore();
+}
+// texto que sube desde una máscara
+function rise(str, x, y, p, o = {}) {
+  if (p <= 0) return;
+  const size = o.size || 60;
+  const e = E.out(clamp(p));
+  ctx.save();
+  ctx.beginPath(); ctx.rect(0, y - size * 1.05, W, size * 1.4); ctx.clip();
+  txt(str, x, y + (1 - e) * size * 1.2, { ...o, alpha: (o.alpha ?? 1) * clamp(p * 2) });
+  ctx.restore();
+}
+function measure(str, size, weight = 800, ls = 0) {
+  ctx.save(); ctx.font = `${weight} ${size}px ${FONT}`; ctx.letterSpacing = ls + 'px';
+  const w = ctx.measureText(str).width; ctx.restore(); return w;
+}
+function chip(str, x, y, o = {}) {
+  const { bg = C.lime, fg = C.dark, size = 26, alpha = 1, p = 1 } = o;
+  if (p <= 0 || alpha <= 0) return;
+  const w = measure(str, size, 800, 2) + size * 1.4, h = size * 1.75;
+  const e = E.out(clamp(p));
+  ctx.save(); ctx.globalAlpha *= alpha * clamp(p * 3);
+  ctx.beginPath(); ctx.roundRect(x, y - h * .72, w * e, h, h / 2); ctx.fillStyle = bg; ctx.fill(); ctx.clip();
+  txt(str, x + size * .7, y + size * .12, { size, weight: 800, color: fg, ls: 2 });
+  ctx.restore();
+}
+function check(x, y, r, p) {
+  if (p <= 0) return;
+  const e = E.back(clamp(p));
+  ctx.save(); ctx.translate(x, y); ctx.scale(e, e);
+  ctx.fillStyle = C.lime; ctx.beginPath(); ctx.arc(0, 0, r, 0, 7); ctx.fill();
+  ctx.strokeStyle = C.dark; ctx.lineWidth = r * .22; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  ctx.beginPath(); ctx.moveTo(-r * .45, 0); ctx.lineTo(-r * .1, r * .35); ctx.lineTo(r * .5, -r * .35); ctx.stroke();
+  ctx.restore();
+}
+
+// ---------- bidón Ligier
+function bottle(x, y, s, key, o = {}) {
+  const { alpha = 1, rot = 0, sweep = -1, glow = null } = o;
+  const P = PRODUCTS[key];
+  if (alpha <= 0) return;
+  ctx.save();
+  ctx.globalAlpha *= alpha;
+  ctx.translate(x, y); ctx.rotate(rot); ctx.scale(s, s);
+  if (glow) {
+    const g = ctx.createRadialGradient(0, -230, 10, 0, -230, 420);
+    g.addColorStop(0, glow); g.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = g; ctx.fillRect(-450, -680, 900, 900);
+  }
+  if (!rot) {
+    ctx.fillStyle = 'rgba(0,0,0,.35)';
+    ctx.beginPath(); ctx.ellipse(0, 4, 175, 22, 0, 0, 7); ctx.fill();
+  }
+  const bodyG = ctx.createLinearGradient(-150, 0, 150, 0);
+  bodyG.addColorStop(0, '#BFC6C0'); bodyG.addColorStop(.3, '#FFFFFF'); bodyG.addColorStop(.62, '#EEF1EC'); bodyG.addColorStop(1, '#A3AAA3');
+  // asa (con agujero)
+  const handle = new Path2D();
+  handle.roundRect(-138, -478, 156, 100, 32);
+  handle.roundRect(-110, -456, 100, 44, 18);
+  ctx.fillStyle = bodyG; ctx.fill(handle, 'evenodd');
+  // pico + tapa
+  ctx.fillStyle = '#D9DED8'; ctx.fillRect(42, -428, 66, 34);
+  const capG = ctx.createLinearGradient(30, 0, 120, 0);
+  capG.addColorStop(0, P.c2); capG.addColorStop(.4, P.c1); capG.addColorStop(1, P.c2);
+  ctx.fillStyle = capG; ctx.beginPath(); ctx.roundRect(30, -472, 90, 50, 8); ctx.fill();
+  ctx.strokeStyle = 'rgba(0,0,0,.18)'; ctx.lineWidth = 2;
+  for (let i = 0; i < 6; i++) { ctx.beginPath(); ctx.moveTo(40 + i * 14, -468); ctx.lineTo(40 + i * 14, -426); ctx.stroke(); }
+  // cuerpo
+  const body = new Path2D(); body.roundRect(-150, -400, 300, 400, 34);
+  ctx.fillStyle = bodyG; ctx.fill(body);
+  ctx.strokeStyle = 'rgba(0,0,0,.12)'; ctx.lineWidth = 2; ctx.stroke(body);
+  // etiqueta
+  const lab = new Path2D(); lab.roundRect(-126, -345, 252, 300, 14);
+  const lg = ctx.createLinearGradient(0, -345, 0, -45);
+  lg.addColorStop(0, P.c1); lg.addColorStop(1, P.c2);
+  ctx.fillStyle = lg; ctx.fill(lab);
+  ctx.save(); ctx.clip(lab);
+  ctx.fillStyle = C.dark; ctx.fillRect(-126, -345, 252, 54);
+  txt('LIGIER', 0, -306, { size: 30, weight: 900, align: 'center', ls: 7 });
+  // ola decorativa
+  ctx.strokeStyle = C.lime; ctx.lineWidth = 6; ctx.beginPath();
+  for (let i = 0; i <= 40; i++) { const xx = -126 + i * 6.3; const yy = -118 + Math.sin(i * .35) * 7; i ? ctx.lineTo(xx, yy) : ctx.moveTo(xx, yy); }
+  ctx.stroke();
+  ctx.fillStyle = 'rgba(255,255,255,.10)'; ctx.beginPath(); ctx.arc(110, -70, 120, 0, 7); ctx.fill();
+  const lines = P.lines;
+  lines.forEach((ln, i) => {
+    let sz = 70; while (measure(ln, sz, 900) > 220) sz -= 2;
+    const yy = lines.length === 1 ? -175 : -205 + i * 66;
+    txt(ln, 0, yy, { size: sz, weight: 900, align: 'center' });
+  });
+  let ts = 19; while (measure(P.tag, ts, 700, 2) > 225) ts -= 1;
+  txt(P.tag, 0, -78, { size: ts, weight: 700, align: 'center', ls: 2, alpha: .92 });
+  ctx.restore();
+  // brillo vertical
+  ctx.fillStyle = 'rgba(255,255,255,.55)';
+  ctx.beginPath(); ctx.roundRect(-140, -385, 10, 360, 5); ctx.fill();
+  // barrido de luz
+  if (sweep >= 0 && sweep <= 1) {
+    ctx.save(); ctx.clip(body);
+    const sx = lerp(-420, 420, E.inOut(sweep));
+    const sg = ctx.createLinearGradient(sx - 90, 0, sx + 90, 0);
+    sg.addColorStop(0, 'rgba(255,255,255,0)'); sg.addColorStop(.5, 'rgba(255,255,255,.55)'); sg.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.fillStyle = sg; ctx.transform(1, 0, -.35, 1, 0, 0); ctx.fillRect(sx - 300, -420, 600, 440);
+    ctx.restore();
+  }
+  ctx.restore();
+}
+// boca del bidón en coordenadas de pantalla
+function bottleMouth(x, y, s, rot) {
+  const lx = 75, ly = -472;
+  return [x + s * (lx * Math.cos(rot) - ly * Math.sin(rot)), y + s * (lx * Math.sin(rot) + ly * Math.cos(rot))];
+}
+
+// ---------- hojas y gotas
+function leafPath(len, wid) {
+  const p = new Path2D();
+  p.moveTo(0, 0);
+  p.bezierCurveTo(len * .25, -wid * 1.05, len * .7, -wid * .9, len, 0);
+  p.bezierCurveTo(len * .7, wid * .9, len * .25, wid * 1.05, 0, 0);
+  return p;
+}
+function drawLeaf(x, y, len, wid, ang, c1, c2, vein) {
+  ctx.save(); ctx.translate(x, y); ctx.rotate(ang);
+  const p = leafPath(len, wid);
+  const g = ctx.createLinearGradient(0, -wid, 0, wid);
+  g.addColorStop(0, c1); g.addColorStop(1, c2);
+  ctx.fillStyle = g; ctx.fill(p);
+  ctx.strokeStyle = vein; ctx.lineWidth = Math.max(1.5, wid * .05); ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(-len * .08, 0); ctx.quadraticCurveTo(len * .5, -wid * .04, len * .97, 0); ctx.stroke();
+  ctx.lineWidth *= .5;
+  for (let i = 1; i < 8; i++) {
+    const u = i / 8 * len * .88, w = wid * Math.sin(Math.PI * (u / len)) * .62;
+    ctx.beginPath(); ctx.moveTo(u, 0); ctx.quadraticCurveTo(u + len * .05, -w * .5, u + len * .11, -w);
+    ctx.moveTo(u, 0); ctx.quadraticCurveTo(u + len * .05, w * .5, u + len * .11, w); ctx.stroke();
+  }
+  ctx.restore();
+}
+function drop(x, y, rx, ry, a = 1, tint = null) {
+  if (a <= 0 || rx <= 0) return;
+  ctx.save(); ctx.globalAlpha *= a;
+  ctx.fillStyle = 'rgba(0,30,0,.25)';
+  ctx.beginPath(); ctx.ellipse(x + rx * .15, y + ry * .9, rx * .95, Math.max(3, ry * .25), 0, 0, 7); ctx.fill();
+  const g = ctx.createRadialGradient(x - rx * .3, y - ry * .35, rx * .05, x, y, Math.max(rx, ry));
+  g.addColorStop(0, 'rgba(255,255,255,.95)');
+  g.addColorStop(.3, tint || 'rgba(215,240,255,.55)');
+  g.addColorStop(1, 'rgba(110,170,190,.45)');
+  ctx.fillStyle = g; ctx.beginPath(); ctx.ellipse(x, y, rx, ry, 0, 0, 7); ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,.65)'; ctx.lineWidth = 2; ctx.stroke();
+  ctx.fillStyle = 'rgba(255,255,255,.95)';
+  ctx.beginPath(); ctx.ellipse(x - rx * .38, y - ry * .42, rx * .2, Math.max(2, ry * .14), -.5, 0, 7); ctx.fill();
+  ctx.restore();
+}
+
+// ---------- campo en perspectiva
+function sky(stops, hy) {
+  const g = ctx.createLinearGradient(0, 0, 0, hy);
+  stops.forEach(([o, c]) => g.addColorStop(o, c));
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, hy + 2);
+}
+function sun(x, y, r, core, halo) {
+  const g = ctx.createRadialGradient(x, y, r * .2, x, y, r * 6);
+  g.addColorStop(0, halo); g.addColorStop(1, 'rgba(255,200,120,0)');
+  ctx.fillStyle = g; ctx.fillRect(x - r * 6, y - r * 6, r * 12, r * 12);
+  ctx.fillStyle = core; ctx.beginPath(); ctx.arc(x, y, r, 0, 7); ctx.fill();
+}
+function field(hy, scroll, far, near, row, band) {
+  const g = ctx.createLinearGradient(0, hy, 0, H);
+  g.addColorStop(0, far); g.addColorStop(1, near);
+  ctx.fillStyle = g; ctx.fillRect(0, hy, W, H - hy);
+  ctx.fillStyle = row;
+  for (let i = -40; i <= 40; i++) {
+    const xt = W / 2 + i * 5, xb = W / 2 + i * 150;
+    ctx.beginPath(); ctx.moveTo(xt - .6, hy); ctx.lineTo(xt + .6, hy); ctx.lineTo(xb + 34, H); ctx.lineTo(xb - 34, H); ctx.fill();
+  }
+  ctx.strokeStyle = band;
+  for (let j = 0; j < 26; j++) {
+    const s = ((j - scroll) % 26 + 26) % 26, z = s + .55;
+    const y = hy + 420 / z; if (y > H) continue;
+    ctx.globalAlpha = clamp(1.2 / z); ctx.lineWidth = Math.max(1, 6 / z);
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+  const hz = ctx.createLinearGradient(0, hy - 40, 0, hy + 90);
+  hz.addColorStop(0, 'rgba(255,230,190,0)'); hz.addColorStop(.4, 'rgba(255,230,190,.35)'); hz.addColorStop(1, 'rgba(255,230,190,0)');
+  ctx.fillStyle = hz; ctx.fillRect(0, hy - 40, W, 130);
+}
+function shade(y0, y1, a0, a1, col = '0,0,0') {
+  const g = ctx.createLinearGradient(0, y0, 0, y1);
+  g.addColorStop(0, `rgba(${col},${a0})`); g.addColorStop(1, `rgba(${col},${a1})`);
+  ctx.fillStyle = g; ctx.fillRect(0, y0, W, y1 - y0);
+}
+function watermark(a = 1) {
+  txt('LIGIER', W - 70, 82, { size: 30, weight: 900, align: 'right', ls: 7, alpha: .75 * a });
+}
+
+// =====================================================================
+//  ESCENA 1 — Intro: campo al amanecer + logo
+// =====================================================================
+const mist = (() => { const r = rng(11); return Array.from({ length: 260 }, () => ({ x: r() * W, y: 380 + r() * 700, s: .5 + r() * 2.2, v: 30 + r() * 90, a: .15 + r() * .5 })); })();
+function sIntro(t, d) {
+  ctx.save();
+  const z = 1.06 - t * .012; ctx.translate(W / 2, H / 2); ctx.scale(z, z); ctx.translate(-W / 2, -H / 2);
+  const hy = 640;
+  sky([[0, '#14324A'], [.55, '#7C5A70'], [.85, '#F08A4B'], [1, '#FFD27A']], hy);
+  sun(960, hy - 10 - t * 14, 70, '#FFF1C9', 'rgba(255,190,110,.55)');
+  field(hy, t * 1.4, '#7A6A3C', '#24401F', 'rgba(20,45,18,.55)', 'rgba(255,220,160,.35)');
+  ctx.restore();
+  // niebla de pulverización
+  for (const m of mist) {
+    const x = ((m.x - t * m.v) % W + W) % W;
+    ctx.fillStyle = `rgba(255,245,225,${m.a * .7})`;
+    ctx.beginPath(); ctx.arc(x, m.y + Math.sin(t + m.x) * 6, m.s, 0, 7); ctx.fill();
+  }
+  shade(0, H, .15, .55);
+  const out = 1 - prog(t, d - .4, d);
+  // logo letra por letra
+  const word = 'LIGIER', size = 230, ls = 26;
+  const total = measure(word, size, 900, ls) - ls;
+  let x = W / 2 - total / 2;
+  for (let i = 0; i < word.length; i++) {
+    const p = prog(t, .5 + i * .09, 1.25 + i * .09);
+    rise(word[i], x, 560, p, { size, weight: 900, ls: 0, shadow: 30, alpha: out });
+    x += measure(word[i], size, 900) + ls;
+  }
+  const bw = 520 * E.out(prog(t, 1.3, 2.0));
+  ctx.globalAlpha = out; ctx.fillStyle = C.lime; ctx.fillRect(W / 2 - bw / 2, 600, bw, 8); ctx.globalAlpha = 1;
+  rise('ADYUVANTES  ·  ARGENTINA', W / 2, 668, prog(t, 1.6, 2.3), { size: 32, weight: 700, ls: 10, align: 'center', alpha: out * .9 });
+  rise('Especialistas en calidad de aplicación', W / 2, 790, prog(t, 2.3, 3.1), { size: 58, weight: 800, align: 'center', shadow: 20, alpha: out });
+}
+
+// =====================================================================
+//  ESCENA 2a — Macro de hoja: sin adyuvante vs Grass Bio
+// =====================================================================
+const bokeh = (() => { const r = rng(21); return Array.from({ length: 28 }, () => ({ x: r() * W, y: r() * 600, r: 30 + r() * 110, a: .05 + r() * .12, v: 8 + r() * 20 })); })();
+function sLeaf(t, d) {
+  const bg = ctx.createLinearGradient(0, 0, 0, H);
+  bg.addColorStop(0, '#0C2E1C'); bg.addColorStop(1, '#2D6B38');
+  ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
+  for (const b of bokeh) {
+    ctx.fillStyle = `rgba(200,255,170,${b.a * .45})`;
+    ctx.beginPath(); ctx.arc((b.x + t * b.v) % (W + 200) - 100, b.y, b.r, 0, 7); ctx.fill();
+  }
+  ctx.save(); const z = 1 + t * .01; ctx.translate(W / 2, 760); ctx.scale(z, z); ctx.translate(-W / 2, -760);
+  drawLeaf(-260, 780, 2500, 360, -.02, '#6CC24F', '#2C7A30', 'rgba(230,255,200,.35)');
+  ctx.restore();
+  const out = 1 - prog(t, d - .4, d);
+  const land = 700, r0 = 46, tl0 = 1.25;
+  // divisor
+  ctx.save(); ctx.globalAlpha = .35 * out * prog(t, .2, .8); ctx.strokeStyle = '#fff'; ctx.setLineDash([14, 14]); ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.moveTo(960, 250); ctx.lineTo(960, 1000); ctx.stroke(); ctx.restore();
+  // caída
+  const fallY = p => lerp(-80, land - r0, E.in(p));
+  // gota izquierda: rebota y se evapora
+  {
+    const x = 560, fp = prog(t, .55, tl0);
+    if (t < tl0) drop(x, fallY(fp), r0 * .9, r0 * 1.12, out);
+    else {
+      const tl = t - tl0;
+      const hop = Math.abs(Math.sin(tl * 8)) * 70 * Math.exp(-tl * 3.5);
+      const sq = Math.exp(-tl * 5) * Math.abs(Math.cos(tl * 8)) * .25;
+      const ev = 1 - .72 * E.inOut(prog(tl, 1.0, 3.4));
+      const r = r0 * ev;
+      drop(x + tl * 12, land - r * (1 - sq) - hop, r * (1 + sq), r * (1 - sq), out);
+      // vapor
+      if (tl > 1) {
+        ctx.save(); ctx.strokeStyle = 'rgba(255,255,255,.5)'; ctx.lineWidth = 4; ctx.lineCap = 'round';
+        for (let k = 0; k < 3; k++) {
+          const ph = ((tl * .9 + k / 3) % 1);
+          ctx.globalAlpha = (1 - ph) * .8 * out * prog(tl, 1, 1.4);
+          const bx = x + tl * 12 + (k - 1) * 26, by = land - r * 2 - ph * 120;
+          ctx.beginPath(); ctx.moveTo(bx, by);
+          ctx.bezierCurveTo(bx + 18, by - 25, bx - 18, by - 45, bx, by - 70); ctx.stroke();
+        }
+        ctx.restore();
+      }
+    }
+  }
+  // gota derecha: Grass Bio moja y penetra
+  {
+    const x = 1360, fp = prog(t, .55, tl0);
+    if (t < tl0) drop(x, fallY(fp), r0 * .9, r0 * 1.12, out, 'rgba(200,255,180,.55)');
+    else {
+      const tl = t - tl0;
+      const s = E.out(prog(tl, 0, .9));
+      const rx = r0 * (1 + 2.8 * s), ry = r0 * (1 - .66 * s);
+      // anillo de impacto
+      const rp = prog(tl, 0, .7);
+      if (rp < 1) { ctx.save(); ctx.globalAlpha = (1 - rp) * out; ctx.strokeStyle = C.lime; ctx.lineWidth = 5; ctx.beginPath(); ctx.ellipse(x, land, 60 + rp * 260, 14 + rp * 55, 0, 0, 7); ctx.stroke(); ctx.restore(); }
+      // penetración
+      if (tl > .8) {
+        ctx.save(); ctx.lineCap = 'round';
+        for (let k = 0; k < 9; k++) {
+          const ph = ((tl * .8 + k * .37) % 1);
+          const px = x - rx * .8 + (k / 8) * rx * 1.6;
+          ctx.globalAlpha = Math.sin(ph * Math.PI) * out * prog(tl, .8, 1.2);
+          ctx.strokeStyle = C.lime; ctx.lineWidth = 6;
+          ctx.beginPath(); ctx.moveTo(px, land + 8 + ph * 40); ctx.lineTo(px, land + 30 + ph * 40); ctx.stroke();
+        }
+        ctx.restore();
+      }
+      drop(x, land - ry * .8, rx, ry, out * (1 - .35 * prog(tl, 1.5, 3.5)), 'rgba(200,255,180,.55)');
+    }
+  }
+  rise('Cada gota cuenta.', W / 2, 170, prog(t, .1, .7), { size: 86, weight: 900, align: 'center', shadow: 24, alpha: out });
+  const cw1 = measure('SIN ADYUVANTE', 28, 800, 2) + 39, cw2 = measure('CON LIGIER GRASS BIO', 28, 800, 2) + 39;
+  chip('SIN ADYUVANTE', 560 - cw1 / 2, 300, { bg: 'rgba(20,20,20,.75)', fg: '#fff', size: 28, p: prog(t, .3, .8), alpha: out });
+  chip('CON LIGIER GRASS BIO', 1360 - cw2 / 2, 300, { size: 28, p: prog(t, .4, .9), alpha: out });
+  rise('Rebota, escurre y se evapora', 560, 960, prog(t, 2.4, 3.0), { size: 40, weight: 700, align: 'center', shadow: 16, alpha: out * .95 });
+  rise('Moja, cubre y penetra', 1360, 960, prog(t, 2.6, 3.2), { size: 40, weight: 800, align: 'center', color: C.lime, shadow: 16, alpha: out });
+  watermark(out);
+}
+
+// =====================================================================
+//  ESCENA 2b — Producto estrella: Grass Bio
+// =====================================================================
+const floaters = (() => { const r = rng(31); return Array.from({ length: 50 }, () => ({ x: r() * W, y: r() * H, r: 3 + r() * 10, v: 20 + r() * 60, a: .1 + r() * .35 })); })();
+function rays(cx, cy, n, rot, col) {
+  ctx.save(); ctx.translate(cx, cy); ctx.rotate(rot); ctx.fillStyle = col;
+  for (let i = 0; i < n; i++) {
+    ctx.rotate(Math.PI * 2 / n);
+    ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(1500, -90); ctx.lineTo(1500, 90); ctx.fill();
+  }
+  ctx.restore();
+}
+function sGrass(t, d) {
+  const g = ctx.createRadialGradient(1380, 560, 50, 1380, 560, 1300);
+  g.addColorStop(0, '#2FA84F'); g.addColorStop(.45, '#0B3B24'); g.addColorStop(1, '#04140C');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  rays(1380, 560, 14, t * .08, 'rgba(181,230,29,.05)');
+  for (const f of floaters) {
+    const y = ((f.y - t * f.v) % H + H) % H;
+    ctx.fillStyle = `rgba(200,255,170,${f.a})`; ctx.beginPath(); ctx.arc(f.x, y, f.r, 0, 7); ctx.fill();
+  }
+  const out = 1 - prog(t, d - .4, d);
+  const bx = lerp(2300, 1390, E.out(prog(t, 0, 1.0)));
+  const sw = t < 3 ? prog(t, 1.0, 2.0) : prog(t, 4.0, 5.0);
+  bottle(bx, 960 + Math.sin(t * 1.6) * 8, 1.4, 'grass', { sweep: sw, glow: 'rgba(181,230,29,.35)', alpha: out });
+  const x = 140;
+  chip('★  PRODUCTO ESTRELLA', x, 230, { size: 28, p: prog(t, .3, .9), alpha: out });
+  rise('LIGIER', x, 345, prog(t, .45, 1.0), { size: 58, weight: 900, color: C.lime, ls: 12, alpha: out });
+  rise('GRASS BIO', x - 6, 495, prog(t, .6, 1.2), { size: 176, weight: 900, shadow: 30, alpha: out });
+  rise('Potencia tus herbicidas frente a malezas difíciles', x, 575, prog(t, 1.0, 1.6), { size: 36, weight: 600, alpha: out * .9 });
+  const items = ['Mayor penetración', 'Acción antievaporante', 'Mejor mojado de la hoja', 'Estabiliza el caldo de aplicación'];
+  items.forEach((s, i) => {
+    const p = prog(t, 1.7 + i * .35, 2.3 + i * .35);
+    const y = 690 + i * 86;
+    ctx.save(); ctx.globalAlpha = out; check(x + 26, y - 14, 24, p); ctx.restore();
+    rise(s, x + 74, y, p, { size: 42, weight: 700, alpha: out });
+  });
+  watermark(out);
+}
+
+// =====================================================================
+//  ESCENA 3 — 3 nuevos lanzamientos
+// =====================================================================
+function sLaunch(t, d) {
+  ctx.fillStyle = C.lime; ctx.fillRect(0, 0, W, H);
+  ctx.save(); ctx.fillStyle = 'rgba(11,46,34,.08)';
+  for (let i = 0; i < 8; i++) { const x = ((i * 300 + t * 160) % 2400) - 300; ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x + 120, 0); ctx.lineTo(x - 280, H); ctx.lineTo(x - 400, H); ctx.fill(); }
+  ctx.restore();
+  const out = 1 - prog(t, d - .35, d);
+  rise('LIGIER PRESENTA', 120, 250, prog(t, .05, .5), { size: 40, weight: 800, color: C.dark, ls: 10, alpha: out });
+  rise('3 NUEVOS', 112, 420, prog(t, .15, .7), { size: 180, weight: 900, color: C.dark, alpha: out });
+  rise('LANZAMIENTOS', 116, 535, prog(t, .3, .85), { size: 100, weight: 900, color: C.dark, alpha: out });
+  rise('Utilitarios y para drones', 120, 620, prog(t, .6, 1.1), { size: 40, weight: 600, color: C.dark, alpha: out * .85 });
+  const keys = ['cero', 'tracker', 'orbit'], tags = ['UTILITARIO', 'UTILITARIO', 'DRONES'];
+  keys.forEach((k, i) => {
+    const p = prog(t, .45 + i * .22, 1.1 + i * .22);
+    const x = 1150 + i * 300, s = .74 * E.back(p);
+    if (p > 0) bottle(x, 900 + Math.sin(t * 2 + i) * 6, s, k, { alpha: out, sweep: prog(t, 1.6 + i * .15, 2.4 + i * .15) });
+    const cw = measure(tags[i], 22, 800, 2) + 31;
+    chip(tags[i], x - cw / 2, 975, { size: 22, bg: C.dark, fg: C.lime, p: prog(t, .9 + i * .22, 1.4 + i * .22), alpha: out });
+  });
+}
+
+// =====================================================================
+//  ESCENA 4 — Ligier Cero: tanque con espuma
+// =====================================================================
+const TANK = { x0: 170, x1: 870, top: 340, bot: 960 };
+const bubbles = (() => {
+  const r = rng(41), arr = [];
+  for (let i = 0; i < 950; i++) {
+    const h = Math.pow(r(), .85), u = r();
+    const b = { u, h, r: 9 + r() * 22, ap: .5 + h * 2.6 + r() * .35, k: r(), over: h > .5 && r() < .45, side: u < .5 ? -1 : 1, off: r() * 70, vy: 60 + r() * 120 };
+    arr.push(b);
+  }
+  return arr.sort((a, b) => a.h - b.h);
+})();
+function tankLevel(t) { return lerp(TANK.bot - 25, 590, E.out(prog(t, 0, 3.0))); }
+function bubblePos(b, t, lvl) {
+  const iw = TANK.x1 - TANK.x0 - 30;
+  let x = TANK.x0 + 15 + b.u * iw, y = lvl - b.h * 400;
+  if (b.over && y < TANK.top + 10) {
+    const ot = t - b.ap;
+    x = b.side < 0 ? TANK.x0 - 12 - b.off * .6 : TANK.x1 + 12 + b.off * .6;
+    y = Math.min(TANK.top + ot * b.vy, TANK.bot - b.r);
+  }
+  return [x, y];
+}
+function sCero(t, d) {
+  const bg = ctx.createLinearGradient(0, 0, 0, H);
+  bg.addColorStop(0, '#E7EFF3'); bg.addColorStop(.86, '#B7C8D3'); bg.addColorStop(.861, '#7C8F99'); bg.addColorStop(1, '#5E707A');
+  ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
+  // ventana con campo
+  ctx.save(); ctx.beginPath(); ctx.roundRect(980, 90, 860, 230, 16); ctx.clip();
+  sky([[0, '#7EC3EA'], [1, '#D8EEF8']], 260);
+  ctx.fillStyle = '#6E9F45'; ctx.fillRect(980, 250, 860, 80);
+  ctx.strokeStyle = 'rgba(40,80,30,.45)'; ctx.lineWidth = 3;
+  for (let i = -20; i <= 20; i++) { ctx.beginPath(); ctx.moveTo(1410 + i * 8, 250); ctx.lineTo(1410 + i * 70, 330); ctx.stroke(); }
+  ctx.restore();
+  ctx.strokeStyle = '#fff'; ctx.lineWidth = 10; ctx.beginPath(); ctx.roundRect(980, 90, 860, 230, 16); ctx.stroke();
+  const out = 1 - prog(t, d - .4, d);
+  const lvl = tankLevel(t);
+  const { x0, x1, top, bot } = TANK;
+  // patas
+  ctx.fillStyle = '#5B6670'; ctx.fillRect(x0 + 40, bot - 10, 26, 40); ctx.fillRect(x1 - 66, bot - 10, 26, 40);
+  // tanque: fondo
+  const tank = new Path2D(); tank.roundRect(x0, top, x1 - x0, bot - top, [10, 10, 60, 60]);
+  ctx.fillStyle = 'rgba(255,255,255,.35)'; ctx.fill(tank);
+  // líquido (caldo)
+  ctx.save(); ctx.clip(tank);
+  const lg = ctx.createLinearGradient(0, lvl, 0, bot);
+  lg.addColorStop(0, 'rgba(120,190,120,.85)'); lg.addColorStop(1, 'rgba(30,100,70,.95)');
+  ctx.fillStyle = lg; ctx.beginPath(); ctx.moveTo(x0, bot);
+  const turb = t < 4.4 ? 10 : 10 * Math.exp(-(t - 4.4) * 1.2) + 2;
+  for (let x = x0; x <= x1; x += 10) ctx.lineTo(x, lvl + Math.sin(x * .03 + t * 6) * turb);
+  ctx.lineTo(x1, bot); ctx.fill();
+  // burbujas internas
+  for (let i = 0; i < 30; i++) { const ph = (t * .5 + i * .137) % 1; ctx.fillStyle = 'rgba(255,255,255,.25)'; ctx.beginPath(); ctx.arc(x0 + 40 + (i * 97) % (x1 - x0 - 80), bot - ph * (bot - lvl), 4, 0, 7); ctx.fill(); }
+  ctx.restore();
+  // manguera de carga
+  if (t < 3.6) {
+    const a = 1 - prog(t, 3.2, 3.6);
+    ctx.save(); ctx.globalAlpha = a;
+    ctx.strokeStyle = '#2B3238'; ctx.lineWidth = 34; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(-40, 180); ctx.quadraticCurveTo(220, 150, 300, 300); ctx.stroke();
+    ctx.strokeStyle = 'rgba(190,230,255,.85)'; ctx.lineWidth = 16;
+    ctx.beginPath(); ctx.moveTo(305, 312); ctx.lineTo(310 + Math.sin(t * 30) * 3, lvl); ctx.stroke();
+    ctx.restore();
+  }
+  // espuma
+  const pourT = 4.45, pourX = 720;
+  let alive = 0, shown = 0;
+  for (const b of bubbles) {
+    if (t < b.ap) continue;
+    const [x, y] = bubblePos(b, t, lvl);
+    const kill = pourT + Math.hypot(x - pourX, y - lvl) / 430 + b.k * .3;
+    const grow = E.back(prog(t, b.ap, b.ap + .25));
+    shown++;
+    if (t < kill) {
+      alive++;
+      const r = b.r * grow;
+      ctx.fillStyle = 'rgba(255,255,255,.94)'; ctx.beginPath(); ctx.arc(x, y, r, 0, 7); ctx.fill();
+      ctx.strokeStyle = 'rgba(150,185,200,.75)'; ctx.lineWidth = 2; ctx.stroke();
+      ctx.fillStyle = 'rgba(255,255,255,1)'; ctx.beginPath(); ctx.arc(x - r * .35, y - r * .35, r * .22, 0, 7); ctx.fill();
+    } else if (t < kill + .2) {
+      const p = (t - kill) / .2;
+      ctx.strokeStyle = `rgba(255,255,255,${1 - p})`; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(x, y, b.r * (1 + p * .8), 0, 7); ctx.stroke();
+    }
+  }
+  // borde del tanque
+  ctx.strokeStyle = '#F4F8FA'; ctx.lineWidth = 12; ctx.stroke(tank);
+  ctx.fillStyle = '#8A99A3'; ctx.fillRect(x0 - 16, top - 14, x1 - x0 + 32, 22);
+  ctx.fillStyle = 'rgba(255,255,255,.35)'; ctx.fillRect(x0 + 24, top + 20, 16, bot - top - 80);
+  // bidón Cero vertiendo
+  const pe = E.inOut(prog(t, 3.5, 4.3)), pb = E.inOut(prog(t, 6.5, 7.3));
+  if (t > 3.5) {
+    let bx = lerp(1250, 470, pe), by = lerp(-250, 30, pe), rot = lerp(0, 2.0, pe), s = .62;
+    if (t > 6.5) { bx = lerp(470, 1735, pb); by = lerp(30, 1000, pb); rot = lerp(2.0, 0, pb); s = lerp(.62, .66, pb); }
+    if (t > 4.3 && t < 6.5) {
+      const [mx, my] = bottleMouth(bx, by, s, rot);
+      const sa = prog(t, 4.3, 4.5) * (1 - prog(t, 6.2, 6.5));
+      const end = lerp(my, lvl, prog(t, 4.3, 4.5));
+      ctx.save(); ctx.globalAlpha = sa; ctx.lineCap = 'round';
+      ctx.strokeStyle = 'rgba(43,182,232,.9)'; ctx.lineWidth = 16;
+      ctx.beginPath(); ctx.moveTo(mx - 10, my + 8);
+      for (let yy = my + 8; yy <= end; yy += 12) ctx.lineTo(mx - 10 + Math.sin(yy * .05 + t * 20) * 3, yy);
+      ctx.stroke();
+      ctx.strokeStyle = 'rgba(255,255,255,.7)'; ctx.lineWidth = 4; ctx.stroke();
+      ctx.restore();
+    }
+    bottle(bx, by, s, 'cero', { rot, alpha: out, sweep: prog(t, 7.4, 8.2) });
+  }
+  // anillos de calma
+  if (t > pourT) for (let k = 0; k < 4; k++) {
+    const ph = ((t - pourT) * .6 + k * .25) % 1;
+    ctx.save(); ctx.globalAlpha = (1 - ph) * .7 * (1 - prog(t, 7.5, 8.5));
+    ctx.strokeStyle = '#fff'; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.ellipse(pourX - 10, lvl, 30 + ph * 300, 6 + ph * 30, 0, 0, 7); ctx.stroke(); ctx.restore();
+  }
+  // textos
+  const tx = 1000;
+  const a1 = 1 - prog(t, 3.6, 4.0);
+  chip('PREPARANDO EL CALDO…', tx, 430, { bg: '#24313A', fg: '#fff', size: 26, p: prog(t, .3, .8), alpha: a1 });
+  rise('¿Espuma en el tanque?', tx, 560, prog(t, 1.8, 2.4), { size: 66, weight: 900, color: '#C0392B', alpha: a1 });
+  rise('Desbordes, pérdida de producto', tx, 630, prog(t, 2.3, 2.8), { size: 40, weight: 600, color: '#24313A', alpha: a1 });
+  rise('y tiempo muerto en la carga.', tx, 682, prog(t, 2.45, 2.95), { size: 40, weight: 600, color: '#24313A', alpha: a1 });
+  rise('Agregá Ligier Cero…', tx, 600, prog(t, 3.9, 4.3), { size: 66, weight: 900, color: '#0B5F8A', alpha: 1 - prog(t, 4.7, 4.9) });
+  chip('NUEVO', tx, 430, { bg: '#0B5F8A', fg: '#fff', size: 26, p: prog(t, 4.8, 5.2), alpha: out });
+  rise('LIGIER', tx, 520, prog(t, 4.9, 5.4), { size: 52, weight: 900, color: '#0B5F8A', ls: 12, alpha: out });
+  rise('CERO', tx - 6, 665, prog(t, 5.0, 5.6), { size: 170, weight: 900, color: '#0B2E22', alpha: out });
+  rise('Antiespumante para la', tx, 735, prog(t, 5.3, 5.8), { size: 42, weight: 700, color: '#24313A', alpha: out });
+  rise('preparación del caldo.', tx, 787, prog(t, 5.4, 5.9), { size: 42, weight: 700, color: '#24313A', alpha: out });
+  rise('Cero espuma. A cargar y salir.', tx, 870, prog(t, 6.0, 6.6), { size: 40, weight: 800, color: '#0B5F8A', alpha: out });
+  // medidor de espuma
+  const ma = prog(t, .6, 1.0) * out, frac = shown ? alive / 950 : 0;
+  ctx.save(); ctx.globalAlpha = ma;
+  txt('NIVEL DE ESPUMA', tx, 960, { size: 22, weight: 800, color: '#24313A', ls: 3 });
+  ctx.fillStyle = 'rgba(36,49,58,.18)'; ctx.beginPath(); ctx.roundRect(tx, 980, 420, 22, 11); ctx.fill();
+  ctx.fillStyle = frac > .5 ? '#C0392B' : '#2BB6E8'; ctx.beginPath(); ctx.roundRect(tx, 980, Math.max(22, 420 * frac), 22, 11); ctx.fill();
+  txt(Math.round(frac * 100) + '%', tx + 440, 1000, { size: 26, weight: 900, color: '#24313A' });
+  ctx.restore();
+}
+
+// =====================================================================
+//  ESCENA 5 — Ligier Tracker: gotas bajo luz UV
+// =====================================================================
+const NIGHT = (() => {
+  const r = rng(51), leaves = [], drops = [], stars = [];
+  for (let i = 0; leaves.length < 18 && i < 400; i++) {
+    const L = { x: 1000 + r() * 720, y: 540 + r() * 520, len: 190 + r() * 150, ang: -Math.PI * .1 - r() * Math.PI * .8 + (r() < .5 ? 0 : Math.PI * .9), sh: .7 + r() * .3 };
+    L.wid = L.len * .42;
+    const tipX = L.x + L.len * Math.cos(L.ang), tipY = L.y + L.len * Math.sin(L.ang);
+    if (Math.min(L.x, tipX) - L.wid * .5 < 960 || Math.min(L.y, tipY) < 470) continue;
+    leaves.push(L);
+    for (let k = 0; k < 26; k++) {
+      const u = .1 + r() * .82, v = (r() * 2 - 1) * .55 * L.wid * Math.sin(Math.PI * u) * .75;
+      const lx = u * L.len, ly = v;
+      drops.push({ x: L.x + lx * Math.cos(L.ang) - ly * Math.sin(L.ang), y: L.y + lx * Math.sin(L.ang) + ly * Math.cos(L.ang), r: 2.5 + r() * 5, tw: r() * 6 });
+    }
+  }
+  for (let i = 0; i < 90; i++) stars.push({ x: r() * W, y: r() * 520, r: .6 + r() * 1.6, tw: r() * 6 });
+  return { leaves, drops, stars };
+})();
+function sTracker(t, d) {
+  const bg = ctx.createLinearGradient(0, 0, 0, H);
+  bg.addColorStop(0, '#070B24'); bg.addColorStop(.55, '#1A1240'); bg.addColorStop(1, '#08140F');
+  ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
+  for (const s of NIGHT.stars) { ctx.fillStyle = `rgba(255,255,255,${.35 + .35 * Math.sin(t * 2 + s.tw)})`; ctx.beginPath(); ctx.arc(s.x, s.y, s.r, 0, 7); ctx.fill(); }
+  // lote a lo lejos
+  ctx.fillStyle = '#0B1A14'; ctx.beginPath(); ctx.moveTo(0, 640);
+  for (let x = 0; x <= W; x += 20) ctx.lineTo(x, 630 + Math.sin(x * .02) * 8 + Math.sin(x * .11) * 4);
+  ctx.lineTo(W, H); ctx.lineTo(0, H); ctx.fill();
+  const drawLeaves = (c1, c2, v) => { for (const L of NIGHT.leaves) drawLeaf(L.x, L.y, L.len, L.wid, L.ang, c1, c2, v); };
+  drawLeaves('#1F4433', '#0E2419', 'rgba(140,190,160,.22)');
+  for (const p of NIGHT.drops) { ctx.fillStyle = 'rgba(200,220,230,.10)'; ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, 7); ctx.fill(); }
+  // linterna UV
+  const on = t > 1.0 ? (t < 1.35 ? (Math.sin(t * 90) > 0 ? 1 : .2) : 1) : 0;
+  const O = [1800, 150];
+  const tx = 1270 + 330 * Math.sin((t - 1) * .75 - 1.0), ty = 820 + 110 * Math.sin(t * 1.1);
+  const th = Math.atan2(ty - O[1], tx - O[0]), ha = .2;
+  if (on > 0) {
+    ctx.save();
+    ctx.beginPath(); ctx.moveTo(O[0], O[1]); ctx.arc(O[0], O[1], 1900, th - ha, th + ha); ctx.closePath(); ctx.clip();
+    ctx.globalAlpha = on;
+    const cg = ctx.createRadialGradient(O[0], O[1], 20, O[0], O[1], 1500);
+    cg.addColorStop(0, 'rgba(170,110,255,.55)'); cg.addColorStop(1, 'rgba(110,50,255,.10)');
+    drawLeaves('#3B2A73', '#1C1450', 'rgba(190,160,255,.30)');
+    ctx.globalCompositeOperation = 'screen'; ctx.fillStyle = cg; ctx.fillRect(0, 0, W, H);
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.shadowColor = C.glow; ctx.shadowBlur = 14;
+    for (const p of NIGHT.drops) {
+      ctx.fillStyle = `rgba(150,255,190,${.75 + .25 * Math.sin(t * 3 + p.tw)})`;
+      ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, 7); ctx.fill();
+    }
+    ctx.restore();
+  }
+  // retículas de análisis
+  const ret = [NIGHT.drops[40], NIGHT.drops[200], NIGHT.drops[333]];
+  ret.forEach((p, i) => {
+    if (!p) return;
+    const a = Math.atan2(p.y - O[1], p.x - O[0]);
+    const inside = Math.abs(a - th) < ha * .85 && on > 0 && t > 3.2;
+    if (!inside) return;
+    ctx.save(); ctx.strokeStyle = C.lime; ctx.lineWidth = 3; const s = 26;
+    ctx.beginPath();
+    for (const [sx, sy] of [[-1, -1], [1, -1], [1, 1], [-1, 1]]) { ctx.moveTo(p.x + sx * s, p.y + sy * s * .5); ctx.lineTo(p.x + sx * s, p.y + sy * s); ctx.lineTo(p.x + sx * s * .5, p.y + sy * s); }
+    ctx.stroke();
+    txt(['GOTA ✓', 'COBERTURA ✓', 'LLEGÓ ✓'][i], p.x + s + 8, p.y - s + 4, { size: 20, weight: 800, color: C.lime });
+    ctx.restore();
+  });
+  // cuerpo de la linterna
+  ctx.save(); ctx.translate(O[0], O[1]); ctx.rotate(th + Math.PI);
+  const bg2 = ctx.createLinearGradient(0, -34, 0, 34); bg2.addColorStop(0, '#5A5F69'); bg2.addColorStop(.5, '#2A2E35'); bg2.addColorStop(1, '#14171B');
+  ctx.fillStyle = bg2; ctx.beginPath(); ctx.roundRect(20, -28, 260, 56, 14); ctx.fill();
+  ctx.beginPath(); ctx.roundRect(-10, -40, 50, 80, 10); ctx.fill();
+  ctx.fillStyle = on ? '#C9A6FF' : '#3A3550'; ctx.beginPath(); ctx.ellipse(-12, 0, 8, 34, 0, 0, 7); ctx.fill();
+  ctx.fillStyle = '#7B3FE4'; ctx.fillRect(120, -28, 10, 56);
+  ctx.restore();
+  if (on) { const fg = ctx.createRadialGradient(O[0], O[1], 0, O[0], O[1], 120); fg.addColorStop(0, 'rgba(220,190,255,.9)'); fg.addColorStop(1, 'rgba(140,80,255,0)'); ctx.fillStyle = fg; ctx.fillRect(O[0] - 120, O[1] - 120, 240, 240); }
+  txt('UV 365 nm', O[0] - 40, O[1] + 110, { size: 24, weight: 800, color: '#CDB3FF', align: 'right', alpha: on * prog(t, 1.4, 1.9) });
+  // textos
+  shade(0, H, 0, 0);
+  const out = 1 - prog(t, d - .4, d), x = 120;
+  chip('NUEVO', x, 200, { bg: '#7B3FE4', fg: '#fff', size: 26, p: prog(t, .3, .8), alpha: out });
+  rise('LIGIER', x, 295, prog(t, .45, .95), { size: 52, weight: 900, color: C.lime, ls: 12, alpha: out });
+  rise('TRACKER', x - 6, 440, prog(t, .6, 1.2), { size: 156, weight: 900, shadow: 30, alpha: out });
+  rise('Trazador visual de calidad', x, 510, prog(t, 1.0, 1.5), { size: 40, weight: 700, alpha: out * .95 });
+  rise('de aplicación.', x, 560, prog(t, 1.1, 1.6), { size: 40, weight: 700, alpha: out * .95 });
+  rise('Iluminá con luz UV y mirá', x, 645, prog(t, 2.0, 2.6), { size: 36, weight: 600, color: '#CDB3FF', alpha: out });
+  rise('dónde llegó cada gota.', x, 690, prog(t, 2.1, 2.7), { size: 36, weight: 600, color: '#CDB3FF', alpha: out });
+  chip('REEMPLAZA LAS TARJETAS HIDROSENSIBLES', x, 775, { size: 22, p: prog(t, 3.0, 3.6), alpha: out });
+  const bp = prog(t, 4.6, 5.4);
+  if (bp > 0) bottle(320, 1050 + (1 - E.out(bp)) * 300, .48, 'tracker', { glow: 'rgba(139,77,255,.45)', alpha: out, sweep: prog(t, 5.6, 6.4) });
+  watermark(out);
+}
+
+// =====================================================================
+//  ESCENA 6 — Ligier Orbit: dron + gotas en órbita
+// =====================================================================
+const droneX = t => 1080 + 170 * Math.sin(t * .4);
+const droneY = t => 310 + 14 * Math.sin(t * 2.1);
+const NOZ = [[-262, 72], [-132, 72], [132, 72], [262, 72]];
+const SPRAY = (() => {
+  const r = rng(61), arr = [];
+  const dt = .011;
+  for (let i = 0; i < 9 / dt; i++) for (let n = 0; n < 4; n++) arr.push({ b: i * dt + r() * dt, n, R: 14 + r() * 40, w: 5 + r() * 5, ph: r() * 6.28, v: 300 + r() * 160, g: 690 + r() * 90, dx: (r() - .5) * 120, c: r() });
+  return arr;
+})();
+function drawDrone(x, y, t) {
+  ctx.save(); ctx.translate(x, y);
+  const rotor = (rx, ry, front) => {
+    ctx.save(); ctx.translate(rx, ry);
+    ctx.fillStyle = '#1E2126'; ctx.beginPath(); ctx.roundRect(-16, -26, 32, 30, 6); ctx.fill();
+    ctx.fillStyle = 'rgba(210,220,235,.16)'; ctx.beginPath(); ctx.ellipse(0, -30, 150, 22, 0, 0, 7); ctx.fill();
+    ctx.strokeStyle = 'rgba(235,240,250,.45)'; ctx.lineWidth = 3;
+    for (let k = 0; k < 2; k++) { const a = t * 47 + k * Math.PI + rx; ctx.beginPath(); ctx.ellipse(0, -30, 150, 22, 0, a, a + .7); ctx.stroke(); }
+    ctx.restore();
+  };
+  ctx.strokeStyle = '#2A2D33'; ctx.lineWidth = 18; ctx.lineCap = 'round';
+  // brazos traseros + rotores traseros
+  ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(-200, -40); ctx.moveTo(0, 0); ctx.lineTo(200, -40); ctx.stroke();
+  rotor(-200, -40); rotor(200, -40);
+  // barra de pulverización y patas
+  ctx.lineWidth = 8; ctx.strokeStyle = '#3B4048';
+  ctx.beginPath(); ctx.moveTo(-275, 66); ctx.lineTo(275, 66); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(-60, 60); ctx.lineTo(-95, 175); ctx.moveTo(60, 60); ctx.lineTo(95, 175); ctx.moveTo(-130, 175); ctx.lineTo(-60, 175); ctx.moveTo(60, 175); ctx.lineTo(130, 175); ctx.stroke();
+  for (const [nx, ny] of NOZ) { ctx.fillStyle = '#F99A35'; ctx.beginPath(); ctx.arc(nx, ny, 7, 0, 7); ctx.fill(); }
+  // tanque
+  const tg = ctx.createLinearGradient(-80, 0, 80, 0); tg.addColorStop(0, '#C9CFD6'); tg.addColorStop(.4, '#FFFFFF'); tg.addColorStop(1, '#9AA2AA');
+  ctx.fillStyle = tg; ctx.beginPath(); ctx.roundRect(-78, 20, 156, 110, 22); ctx.fill();
+  ctx.fillStyle = 'rgba(249,154,53,.75)'; ctx.beginPath(); ctx.roundRect(-70, 70, 140, 52, [0, 0, 18, 18]); ctx.fill();
+  // cuerpo
+  const bgd = ctx.createLinearGradient(0, -60, 0, 40); bgd.addColorStop(0, '#4A505A'); bgd.addColorStop(1, '#1C1F24');
+  ctx.fillStyle = bgd; ctx.beginPath(); ctx.roundRect(-120, -55, 240, 90, 30); ctx.fill();
+  ctx.fillStyle = '#F99A35'; ctx.fillRect(-120, -8, 240, 9);
+  txt('ORBIT', 0, 26, { size: 22, weight: 900, align: 'center', ls: 5, color: '#fff' });
+  ctx.fillStyle = '#0D0F12'; ctx.beginPath(); ctx.arc(0, -30, 14, 0, 7); ctx.fill();
+  ctx.fillStyle = 'rgba(120,200,255,.8)'; ctx.beginPath(); ctx.arc(-4, -34, 4, 0, 7); ctx.fill();
+  // brazos delanteros + rotores
+  ctx.strokeStyle = '#2A2D33'; ctx.lineWidth = 20;
+  ctx.beginPath(); ctx.moveTo(-60, 0); ctx.lineTo(-300, 30); ctx.moveTo(60, 0); ctx.lineTo(300, 30); ctx.stroke();
+  rotor(-300, 30); rotor(300, 30);
+  const blink = Math.sin(t * 8) > 0;
+  ctx.fillStyle = blink ? '#FF3B3B' : '#5A1A1A'; ctx.beginPath(); ctx.arc(-300, 14, 7, 0, 7); ctx.fill();
+  ctx.fillStyle = !blink ? '#3BFF6A' : '#1A5A2A'; ctx.beginPath(); ctx.arc(300, 14, 7, 0, 7); ctx.fill();
+  ctx.restore();
+}
+function ring(cx, cy, rx, ry, rot, a0, a1, col, w) {
+  ctx.save(); ctx.strokeStyle = col; ctx.lineWidth = w; ctx.shadowColor = col; ctx.shadowBlur = 16;
+  ctx.beginPath(); ctx.ellipse(cx, cy, rx, ry, rot, a0, a1); ctx.stroke(); ctx.restore();
+}
+function orbitDots(cx, cy, rx, ry, rot, t, n, front, col) {
+  for (let k = 0; k < n; k++) {
+    const a = t * 1.5 + k * Math.PI * 2 / n;
+    const isFront = Math.sin(a) > 0; if (isFront !== front) continue;
+    const ex = rx * Math.cos(a), ey = ry * Math.sin(a);
+    const x = cx + ex * Math.cos(rot) - ey * Math.sin(rot), y = cy + ex * Math.sin(rot) + ey * Math.cos(rot);
+    ctx.save(); ctx.fillStyle = col; ctx.shadowColor = col; ctx.shadowBlur = 24;
+    ctx.beginPath(); ctx.arc(x, y, front ? 9 : 6, 0, 7); ctx.fill(); ctx.restore();
+  }
+}
+function sOrbit(t, d) {
+  const hy = 640;
+  sky([[0, '#140F3C'], [.45, '#6E2B6C'], [.8, '#EF7149'], [1, '#FFC46B']], hy);
+  sun(560, hy, 64, '#FFE3A8', 'rgba(255,150,90,.6)');
+  field(hy, t * 2.2, '#5C4B36', '#1C2A16', 'rgba(15,30,12,.32)', 'rgba(255,190,120,.22)');
+  const dx = droneX(t), dy = droneY(t);
+  const rp = E.out(prog(t, .9, 2.0));
+  const R = [[dx, dy + 40, 470, 95, -.1, '#F99A35'], [dx, dy + 40, 400, 70, .16, C.lime]];
+  // aros: mitad trasera
+  for (const [cx, cy, rx, ry, rot, col] of R) { if (rp > 0) { ring(cx, cy, rx, ry, rot, Math.PI, Math.PI + Math.PI * rp, col + '88', 3); orbitDots(cx, cy, rx, ry, rot, t, 3, false, col); } }
+  // pulverización con trayectoria en espiral ("en órbita")
+  ctx.save(); ctx.globalCompositeOperation = 'lighter';
+  for (const p of SPRAY) {
+    const age = t - p.b; if (age < 0 || age > 2.2) continue;
+    const nx = droneX(p.b) + NOZ[p.n][0], ny = droneY(p.b) + NOZ[p.n][1];
+    const tl = (p.g - ny) / p.v;
+    if (age < tl) {
+      const k = age / tl, R2 = p.R * Math.sin(Math.PI * k) * 1.6;
+      const x = nx + p.dx * k + R2 * Math.sin(p.w * age + p.ph), y = ny + p.v * age;
+      ctx.fillStyle = p.c < .5 ? `rgba(255,240,220,${.55 * (1 - k * .5)})` : `rgba(255,190,110,${.6 * (1 - k * .5)})`;
+      ctx.beginPath(); ctx.arc(x, y, 2.2 + k * 1.5, 0, 7); ctx.fill();
+    } else if (age < tl + .5) {
+      const a = 1 - (age - tl) / .5;
+      const x = nx + p.dx, y = p.g + (age - tl) * 40;
+      ctx.fillStyle = `rgba(181,230,29,${a * .9})`;
+      ctx.beginPath(); ctx.arc(x, y, 3.5 * a + 1, 0, 7); ctx.fill();
+    }
+  }
+  ctx.restore();
+  drawDrone(dx, dy, t);
+  for (const [cx, cy, rx, ry, rot, col] of R) { if (rp > 0) { ring(cx, cy, rx, ry, rot, 0, Math.PI * rp, col, 4); orbitDots(cx, cy, rx, ry, rot, t, 3, true, col); } }
+  // textos
+  shade(560, H, 0, .78, '8,6,20');
+  const out = 1 - prog(t, d - .4, d), x = 120;
+  chip('NUEVO  ·  PARA DRONES', x, 690, { bg: '#F99A35', fg: '#1A0E05', size: 26, p: prog(t, .4, .9), alpha: out });
+  rise('LIGIER', x, 778, prog(t, .55, 1.05), { size: 50, weight: 900, color: C.lime, ls: 12, alpha: out });
+  rise('ORBIT', x - 6, 920, prog(t, .7, 1.3), { size: 160, weight: 900, shadow: 30, alpha: out });
+  rise('Adyuvante de doble acción para aplicaciones con drones', x, 985, prog(t, 1.3, 1.9), { size: 36, weight: 700, alpha: out });
+  rise('Cada gota, en órbita hasta el objetivo.', x, 1040, prog(t, 2.2, 2.8), { size: 30, weight: 600, italic: true, color: '#FFC88A', alpha: out });
+  const bp = prog(t, 4.2, 5.0);
+  if (bp > 0) {
+    const by = 1010 + (1 - E.out(bp)) * 320, bx = 1700;
+    ring(bx, by - 150, 200, 40, -.15, Math.PI, Math.PI * 2, '#F99A3577', 3);
+    bottle(bx, by, .55, 'orbit', { glow: 'rgba(249,154,53,.4)', alpha: out, sweep: prog(t, 5.2, 6.0) });
+    ring(bx, by - 150, 200, 40, -.15, 0, Math.PI, '#F99A35', 4);
+    orbitDots(bx, by - 150, 200, 40, -.15, t * 1.3, 2, true, C.lime);
+  }
+  watermark(out);
+}
+
+// =====================================================================
+//  ESCENA 7 — Cierre
+// =====================================================================
+function sOutro(t, d) {
+  const g = ctx.createRadialGradient(W / 2, 700, 50, W / 2, 700, 1300);
+  g.addColorStop(0, '#17603F'); g.addColorStop(.5, '#0A2B1D'); g.addColorStop(1, '#030D08');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  rays(W / 2, 760, 18, -t * .06, 'rgba(181,230,29,.045)');
+  for (const f of floaters) { const y = ((f.y - t * f.v) % H + H) % H; ctx.fillStyle = `rgba(200,255,170,${f.a * .6})`; ctx.beginPath(); ctx.arc(f.x, y, f.r * .7, 0, 7); ctx.fill(); }
+  const list = [['grass', 430, .95], ['cero', 800, .8], ['tracker', 1140, .8], ['orbit', 1480, .8]];
+  list.forEach(([k, x, s], i) => {
+    const p = prog(t, .2 + i * .14, 1.0 + i * .14);
+    if (p > 0) bottle(x, 960 + (1 - E.out(p)) * 420, s, k, { sweep: prog(t, 1.6 + i * .12, 2.4 + i * .12), alpha: clamp(p * 3) });
+  });
+  const word = 'LIGIER', size = 150, ls = 18;
+  const total = measure(word, size, 900, ls) - ls;
+  let x = W / 2 - total / 2;
+  for (let i = 0; i < word.length; i++) { rise(word[i], x, 230, prog(t, .3 + i * .06, .9 + i * .06), { size, weight: 900, shadow: 30 }); x += measure(word[i], size, 900) + ls; }
+  rise('Especialistas en calidad de aplicación', W / 2, 310, prog(t, 1.0, 1.6), { size: 44, weight: 700, align: 'center' });
+  rise('Aplicá mejor.', W / 2, 395, prog(t, 1.6, 2.2), { size: 58, weight: 900, align: 'center', color: C.lime });
+  rise('ligieragro.com.ar', W / 2, 1045, prog(t, 2.2, 2.8), { size: 34, weight: 700, align: 'center', ls: 3, alpha: .85 });
+  const f = prog(t, d - .8, d); if (f > 0) { ctx.fillStyle = `rgba(0,0,0,${f})`; ctx.fillRect(0, 0, W, H); }
+}
+
+// =====================================================================
+//  Línea de tiempo
+// =====================================================================
+const SCENES = [
+  [sIntro, 5.0], [sLeaf, 5.5], [sGrass, 6.5], [sLaunch, 3.5],
+  [sCero, 9.0], [sTracker, 9.0], [sOrbit, 9.0], [sOutro, 6.5],
+];
+const BOUNDS = []; { let a = 0; for (const [, d] of SCENES) { BOUNDS.push(a); a += d; } BOUNDS.push(a); }
+const DURATION = BOUNDS[BOUNDS.length - 1];
+const WIPE = .38;
+function wipe(t) {
+  for (let i = 1; i < BOUNDS.length - 1; i++) {
+    const b = BOUNDS[i];
+    if (t < b - WIPE || t > b + WIPE) continue;
+    const p = E.inOut((t - (b - WIPE)) / (2 * WIPE));
+    const L = 2720, s = 300, x0 = lerp(-L - s - 200, W + 200, p);
+    const band = (off, len, col) => { ctx.fillStyle = col; ctx.beginPath(); ctx.moveTo(x0 + off + s, 0); ctx.lineTo(x0 + off + len + s, 0); ctx.lineTo(x0 + off + len, H); ctx.lineTo(x0 + off, H); ctx.fill(); };
+    band(L - 40, 140, C.lime);
+    band(0, L, C.dark);
+    band(-60, 60, C.lime);
+    if (Math.abs(p - .5) < .25) txt('LIGIER', W / 2, H / 2 + 30, { size: 90, weight: 900, align: 'center', ls: 14, alpha: 1 - Math.abs(p - .5) * 4 });
+  }
+}
+let vignette = null;
+function makeVignette() {
+  vignette = document.createElement('canvas'); vignette.width = W; vignette.height = H;
+  const v = vignette.getContext('2d');
+  const g = v.createRadialGradient(W / 2, H / 2, H * .45, W / 2, H / 2, H * 1.05);
+  g.addColorStop(0, 'rgba(0,0,0,0)'); g.addColorStop(1, 'rgba(0,0,0,.45)');
+  v.fillStyle = g; v.fillRect(0, 0, W, H);
+}
+function renderAt(t) {
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over';
+  ctx.shadowBlur = 0; ctx.setLineDash([]);
+  t = clamp(t, 0, DURATION - 1e-4);
+  let i = 0; while (t >= BOUNDS[i + 1]) i++;
+  const [fn, d] = SCENES[i];
+  ctx.save(); fn(t - BOUNDS[i], d); ctx.restore();
+  if (!vignette) makeVignette();
+  ctx.drawImage(vignette, 0, 0);
+  wipe(t);
+  const fi = 1 - prog(t, 0, .6); if (fi > 0) { ctx.fillStyle = `rgba(0,0,0,${fi})`; ctx.fillRect(0, 0, W, H); }
+}
+window.renderAt = renderAt;
+window.DURATION = DURATION;
+window.ready = document.fonts.load(`900 100px Inter`).then(() => document.fonts.load(`700 40px Inter`)).then(() => true);
+
+// reproducción en vivo (si no estamos renderizando)
+if (!/render/.test(location.search)) {
+  let start = null;
+  const audio = new Audio('output/soundtrack.wav');
+  document.body.addEventListener('click', () => { start = performance.now(); audio.currentTime = 0; audio.play().catch(() => {}); });
+  const loop = now => {
+    if (start === null) start = now;
+    let t = (now - start) / 1000;
+    if (t > DURATION) { start = now; t = 0; }
+    renderAt(t);
+    requestAnimationFrame(loop);
+  };
+  window.ready.then(() => requestAnimationFrame(loop));
+}
+</script>
+</body>
+</html>
